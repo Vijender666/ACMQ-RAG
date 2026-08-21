@@ -38,6 +38,13 @@ from .utils.config_utils import BaseConfig
 from .utils.state_utils import remove_sources_from_mapping
 from .utils.qa_utils import reason_step
 
+# ==========================================================
+# ACMQ-RAG Memory
+# ==========================================================
+from .memory import MemoryPipeline
+from .memory.memory_adapter import MemoryAdapter
+from .memory.memory_types import MemoryDecision
+
 logger = logging.getLogger(__name__)
 
 class HippoRAG:
@@ -144,6 +151,10 @@ class HippoRAG:
             self.openie = TransformersOfflineOpenIE(self.global_config)
 
         self.graph = self.initialize_graph()
+        # ==========================================================
+# ACMQ-RAG Graph Statistics
+# ==========================================================
+
 
         if self.global_config.openie_mode == 'offline':
             self.embedding_model = None
@@ -180,6 +191,14 @@ class HippoRAG:
         self.rerank_filter = DSPyFilter(self)
 
         self.ready_to_retrieve = False
+
+        # ==========================================================
+        # ACMQ-RAG Memory Pipeline
+        # ==========================================================
+
+        self.acmq_graph_stats = {}
+
+        self.memory_pipeline = MemoryPipeline()
 
         self.ppr_time = 0
         self.rerank_time = 0
@@ -309,9 +328,28 @@ class HippoRAG:
         # prepare data_store
         chunk_ids = list(chunk_to_rows.keys())
 
-        chunk_triples = [[text_processing(t) for t in triple_results_dict[chunk_id].triples] for chunk_id in chunk_ids]
-        entity_nodes, chunk_triple_entities = extract_entity_nodes(chunk_triples)
-        facts = flatten_facts(chunk_triples)
+        # ==========================================================
+        # ACMQ-RAG Memory Construction
+        # ==========================================================
+
+        chunk_triples = [
+            [text_processing(t) for t in triple_results_dict[chunk_id].triples]
+            for chunk_id in chunk_ids
+        ]
+        print("=" * 60)
+
+        memory_units = MemoryAdapter.chunk_triples_to_memories(
+            chunk_ids,
+            chunk_triples
+        )
+
+        entity_nodes, chunk_triple_entities = extract_entity_nodes(
+            chunk_triples
+        )
+
+        facts = flatten_facts(
+            chunk_triples
+        )
 
         logger.info(f"Encoding Entities")
         self.entity_embedding_store.insert_strings(entity_nodes)
@@ -325,14 +363,397 @@ class HippoRAG:
         self.ent_node_to_chunk_ids = {}
 
         self.add_fact_edges(chunk_ids, chunk_triples)
-        num_new_chunks = self.add_passage_edges(chunk_ids, chunk_triple_entities)
+
+        num_new_chunks = self.add_passage_edges(
+    chunk_ids,
+    chunk_triple_entities
+)
 
         if num_new_chunks > 0:
-            logger.info(f"Found {num_new_chunks} new chunks to save into graph.")
-            self.add_synonymy_edges()
+            logger.info(
+            f"Found {num_new_chunks} new chunks to save into graph."
+        )
 
-            self.augment_graph()
-            self.save_igraph()
+        self.add_synonymy_edges()
+
+        self.augment_graph()
+        self.save_igraph()
+
+        # ==========================================================
+        # ACMQ-RAG Graph Statistics
+        # ==========================================================
+
+        self.acmq_graph_stats = self._compute_acmq_graph_stats()
+
+        print(
+            "ACMQ-RAG: Graph statistics ready:",
+            len(self.acmq_graph_stats)
+        )
+
+        # Connect actual HippoRAG graph statistics
+        # to the ACMQ-RAG Memory Quality Model
+
+        self.memory_pipeline.graph_stats = (
+            self.acmq_graph_stats
+        )
+
+        self.memory_pipeline.quality_model.graph_stats = (
+            self.acmq_graph_stats
+        )
+
+        print(
+            "ACMQ-RAG: Graph statistics connected to quality model:",
+            len(self.memory_pipeline.quality_model.graph_stats)
+        )
+        # ==========================================================
+        # ACMQ-RAG Memory Quality Evaluation
+        # ==========================================================
+
+        print("=" * 60)
+        print("ACMQ-RAG: Evaluating memory quality")
+        print("=" * 60)
+
+        evaluated_memories = self.memory_pipeline.evaluate_only(
+            memory_units
+        )
+
+        print(
+            "ACMQ-RAG: Memories evaluated:",
+            len(evaluated_memories)
+        )
+
+        # ==========================================================
+        # ACMQ-RAG Memory Decision
+        # ==========================================================
+
+        decided_memories = self.memory_pipeline.decide(
+            evaluated_memories
+        )
+
+        print(
+            "ACMQ-RAG: Memory decisions completed:",
+            len(decided_memories)
+        )
+
+        # ==========================================================
+        # ACMQ-RAG Decision Summary
+        # ==========================================================
+
+        accepted_memories = [
+            memory
+            for memory in decided_memories
+            if memory.decision == MemoryDecision.ACCEPT
+        ]
+
+        updated_memories = [
+            memory
+            for memory in decided_memories
+            if memory.decision == MemoryDecision.UPDATE
+        ]
+
+        merged_memories = [
+            memory
+            for memory in decided_memories
+            if memory.decision == MemoryDecision.MERGE
+        ]
+
+        archived_memories = [
+            memory
+            for memory in decided_memories
+            if memory.decision == MemoryDecision.ARCHIVE
+        ]
+
+        discarded_memories = [
+            memory
+            for memory in decided_memories
+            if memory.decision == MemoryDecision.DISCARD
+        ]
+
+        print("=" * 60)
+        print("ACMQ-RAG: Memory Decision Summary")
+        print("=" * 60)
+        print("ACCEPT  :", len(accepted_memories))
+        print("UPDATE  :", len(updated_memories))
+        print("MERGE   :", len(merged_memories))
+        print("ARCHIVE :", len(archived_memories))
+        print("DISCARD :", len(discarded_memories))
+        print("=" * 60)
+
+        # ==========================================================
+        # Store final ACMQ-RAG memory decisions
+        # ==========================================================
+
+        self.memory_pipeline.store(
+            decided_memories
+        )
+
+        self.memory_pipeline.print_statistics()
+
+        # ==========================================================
+        # ACMQ-RAG Graph Memory Selection
+        # ==========================================================
+
+        graph_memories = [
+            memory
+            for memory in decided_memories
+            if memory.decision in (
+                MemoryDecision.ACCEPT,
+                MemoryDecision.UPDATE,
+                MemoryDecision.MERGE,
+            )
+        ]
+
+        print("=" * 60)
+        print("ACMQ-RAG: Graph memory selection")
+        print("=" * 60)
+        print(
+            "ACMQ-RAG: Graph-eligible memories:",
+            len(graph_memories)
+        )
+
+        # ----------------------------------------------------------
+        # Reconstruct graph triples from selected memories
+        # ----------------------------------------------------------
+
+        memory_map = {}
+
+        for memory in graph_memories:
+
+            chunk_id = memory.metadata.chunk_id
+
+            if chunk_id is None:
+                continue
+
+            memory_map.setdefault(
+                chunk_id,
+                []
+            ).append(
+                (
+                    memory.subject,
+                    memory.relation,
+                    memory.object
+                )
+            )
+
+        filtered_chunk_triples = []
+
+        for chunk_id in chunk_ids:
+            filtered_chunk_triples.append(
+                memory_map.get(chunk_id, [])
+            )
+
+        chunk_triples = filtered_chunk_triples
+
+        print(
+            "ACMQ-RAG: Filtered graph triples:",
+            sum(len(x) for x in chunk_triples)
+        )
+
+        # ==========================================================
+        # ACMQ-RAG Final Graph Reconstruction
+        # ==========================================================
+
+        print("=" * 60)
+        print("ACMQ-RAG: Rebuilding final graph from selected memories")
+        print("=" * 60)
+
+        # Convert selected ACMQ memories back into chunk-wise triples.
+        chunk_triples = self._acmq_memories_to_chunk_triples(
+            chunk_ids,
+            graph_memories,
+        )
+
+        print(
+            "ACMQ-RAG: Final graph triples:",
+            sum(len(x) for x in chunk_triples)
+        )
+
+        # Recompute entities and facts from ACMQ-selected memories.
+        entity_nodes, chunk_triple_entities = extract_entity_nodes(
+            chunk_triples
+        )
+
+        facts = flatten_facts(
+            chunk_triples
+        )
+
+        # Rebuild embedding stores for the final graph representation.
+        self.entity_embedding_store.insert_strings(
+            entity_nodes
+        )
+
+        self.fact_embedding_store.insert_strings(
+            [str(fact) for fact in facts]
+        )
+
+        # Reset graph construction state.
+        self.node_to_node_stats = {}
+        self.ent_node_to_chunk_ids = {}
+
+        # Create a fresh graph so discarded/archived memories
+        # cannot remain in the final ACMQ-RAG graph.
+        self.graph = ig.Graph(
+            directed=self.global_config.is_directed_graph
+        )
+
+        # Build the final graph only from ACMQ-selected memories.
+        self.add_fact_edges(
+            chunk_ids,
+            chunk_triples
+        )
+
+        num_new_chunks = self.add_passage_edges(
+            chunk_ids,
+            chunk_triple_entities
+        )
+
+        if num_new_chunks > 0:
+            logger.info(
+                f"ACMQ-RAG: Added {num_new_chunks} selected chunks to final graph."
+            )
+
+        self.add_synonymy_edges()
+
+        self.augment_graph()
+        self.save_igraph()
+
+        # Recompute graph statistics from the final ACMQ graph.
+        self.acmq_graph_stats = self._compute_acmq_graph_stats()
+
+        self.memory_pipeline.graph_stats = (
+            self.acmq_graph_stats
+        )
+
+        self.memory_pipeline.quality_model.graph_stats = (
+            self.acmq_graph_stats
+        )
+
+        print(
+            "ACMQ-RAG: Final graph rebuilt successfully."
+        )
+
+        print(
+            "ACMQ-RAG: Final graph nodes:",
+            self.graph.vcount()
+        )
+
+        print(
+            "ACMQ-RAG: Final graph edges:",
+            self.graph.ecount()
+        )
+
+        print(
+            "ACMQ-RAG: Final graph statistics:",
+            len(self.acmq_graph_stats)
+        )
+
+        print("=" * 60)
+
+    def _acmq_memories_to_chunk_triples(
+        self,
+        chunk_ids,
+        memories,
+    ):
+        """
+        Convert ACMQ-selected MemoryUnits back into
+        chunk-wise triples while preserving chunk IDs.
+        """
+
+        memory_map = {}
+
+        for memory in memories:
+
+            chunk_id = memory.metadata.chunk_id
+
+            if chunk_id is None:
+                continue
+
+            memory_map.setdefault(
+                chunk_id,
+                []
+            ).append(
+                (
+                    memory.subject,
+                    memory.relation,
+                    memory.object,
+                )
+            )
+
+        return [
+            memory_map.get(chunk_id, [])
+            for chunk_id in chunk_ids
+        ]
+
+    def _compute_acmq_graph_stats(self):
+        """
+        Compute graph-aware statistics for ACMQ-RAG.
+
+        Entity/phrase nodes are used for memory importance.
+        Passage/chunk nodes are excluded.
+        """
+
+        if self.graph is None or self.graph.vcount() == 0:
+            return {}
+
+        graph_stats = {}
+
+        degrees = self.graph.degree()
+
+        max_degree = max(degrees) if degrees else 1
+        max_degree = max(max_degree, 1)
+
+        pagerank_scores = self.graph.pagerank()
+
+        max_pagerank = (
+            max(pagerank_scores)
+            if pagerank_scores
+            else 1.0
+        )
+
+        max_pagerank = max(max_pagerank, 1e-12)
+
+        for idx, vertex in enumerate(self.graph.vs):
+
+            if "name" not in vertex.attributes():
+                continue
+
+            name = vertex["name"]
+
+            if name is None:
+                continue
+
+            name = str(name)
+
+            if name.startswith("chunk-"):
+                continue
+
+            # Graph node names are already canonical entity IDs.
+            # Do NOT hash them again.
+            key = name.lower()
+
+            print(
+                f"ACMQ-RAG DEBUG GRAPH NODE: "
+                f"name={name!r} key={key}"
+            )
+
+            graph_stats[key] = {
+                "degree": (
+                    float(degrees[idx])
+                    / float(max_degree)
+                ),
+                "pagerank": (
+                    float(pagerank_scores[idx])
+                    / float(max_pagerank)
+                ),
+            }
+
+        print(
+            "ACMQ-RAG: computed graph statistics for "
+            f"{len(graph_stats)} entity nodes"
+        )
+
+        return graph_stats
+
 
     def delete(self, docs_to_delete: List[str]):
         """
@@ -1276,8 +1697,12 @@ class HippoRAG:
         )
         graph_info['num_triples_with_passage_node'] = num_triples_with_passage_node
 
-        graph_info['num_synonymy_triples'] = len(self.node_to_node_stats) - graph_info[
-            "num_extracted_triples"] - num_triples_with_passage_node
+        graph_info['num_synonymy_triples'] = max(
+            0,
+            len(self.node_to_node_stats)
+            - graph_info["num_extracted_triples"]
+            - num_triples_with_passage_node
+        )
 
         # get # of total triples
         graph_info["num_total_triples"] = len(self.node_to_node_stats)
@@ -1302,7 +1727,7 @@ class HippoRAG:
         # Check if the graph has the expected number of nodes
         expected_node_count = len(self.entity_node_keys) + len(self.passage_node_keys)
         actual_node_count = self.graph.vcount()
-        
+
         if expected_node_count != actual_node_count:
             logger.warning(f"Graph node count mismatch: expected {expected_node_count}, got {actual_node_count}")
             # If the graph is empty but we have nodes, we need to add them
@@ -1315,11 +1740,11 @@ class HippoRAG:
         try:
             igraph_name_to_idx = {node["name"]: idx for idx, node in enumerate(self.graph.vs)} # from node key to the index in the backbone graph
             self.node_name_to_vertex_idx = igraph_name_to_idx
-            
+
             # Check if all entity and passage nodes are in the graph
             missing_entity_nodes = [node_key for node_key in self.entity_node_keys if node_key not in igraph_name_to_idx]
             missing_passage_nodes = [node_key for node_key in self.passage_node_keys if node_key not in igraph_name_to_idx]
-            
+
             if missing_entity_nodes or missing_passage_nodes:
                 logger.warning(f"Missing nodes in graph: {len(missing_entity_nodes)} entity nodes, {len(missing_passage_nodes)} passage nodes")
                 # If nodes are missing, rebuild the graph
@@ -1328,7 +1753,7 @@ class HippoRAG:
                 # Update the mapping
                 igraph_name_to_idx = {node["name"]: idx for idx, node in enumerate(self.graph.vs)}
                 self.node_name_to_vertex_idx = igraph_name_to_idx
-            
+
             self.entity_node_idxs = [igraph_name_to_idx[node_key] for node_key in self.entity_node_keys] # a list of backbone graph node index
             self.passage_node_idxs = [igraph_name_to_idx[node_key] for node_key in self.passage_node_keys] # a list of backbone passage node index
         except Exception as e:
@@ -1361,7 +1786,7 @@ class HippoRAG:
             # Check if the lengths match
             if not (len(self.passage_node_keys) == len(ner_results_dict) == len(triple_results_dict)):
                 logger.warning(f"Length mismatch: passage_node_keys={len(self.passage_node_keys)}, ner_results_dict={len(ner_results_dict)}, triple_results_dict={len(triple_results_dict)}")
-                
+
                 # If there are missing keys, create empty entries for them
                 for chunk_id in self.passage_node_keys:
                     if chunk_id not in ner_results_dict:
@@ -1454,7 +1879,7 @@ class HippoRAG:
         if len(self.fact_embeddings) == 0:
             logger.warning("No facts available for scoring. Returning empty array.")
             return np.array([])
-            
+
         try:
             query_fact_scores = np.dot(self.fact_embeddings, query_embedding.T) # shape: (#facts, )
             query_fact_scores = np.squeeze(query_fact_scores) if query_fact_scores.ndim == 2 else query_fact_scores
@@ -1672,12 +2097,12 @@ class HippoRAG:
         """
         # load args
         link_top_k: int = self.global_config.linking_top_k
-        
+
         # Check if there are any facts to rerank
         if len(query_fact_scores) == 0 or len(self.fact_node_keys) == 0:
             logger.warning("No facts available for reranking. Returning empty lists.")
             return [], [], {'facts_before_rerank': [], 'facts_after_rerank': []}
-            
+
         try:
             # Get the top k facts by score
             if len(query_fact_scores) <= link_top_k:
@@ -1686,26 +2111,26 @@ class HippoRAG:
             else:
                 # Otherwise get the top k
                 candidate_fact_indices = np.argsort(query_fact_scores)[-link_top_k:][::-1].tolist()
-                
+
             # Get the actual fact IDs
             real_candidate_fact_ids = [self.fact_node_keys[idx] for idx in candidate_fact_indices]
             fact_row_dict = self.fact_embedding_store.get_rows(real_candidate_fact_ids)
             candidate_facts = [eval(fact_row_dict[id]['content']) for id in real_candidate_fact_ids]
-            
+
             # Rerank the facts
             top_k_fact_indices, top_k_facts, reranker_dict = self.rerank_filter(query,
                                                                                 candidate_facts,
                                                                                 candidate_fact_indices,
                                                                                 len_after_rerank=link_top_k)
-            
+
             rerank_log = {'facts_before_rerank': candidate_facts, 'facts_after_rerank': top_k_facts}
-            
+
             return top_k_fact_indices, top_k_facts, rerank_log
-            
+
         except Exception as e:
             logger.error(f"Error in rerank_facts: {str(e)}")
             return [], [], {'facts_before_rerank': [], 'facts_after_rerank': [], 'error': str(e)}
-    
+
     def run_ppr(self,
                 reset_prob: np.ndarray,
                 damping: float =0.5) -> Tuple[np.ndarray, np.ndarray]:
