@@ -7,6 +7,7 @@ This dataset is designed to exercise:
     3. UPDATE
     4. ARCHIVE
     5. DISCARD
+    6. LOW-RELIABILITY SAFEGUARD
 """
 
 CONTROLLED_CASES = [
@@ -20,6 +21,7 @@ CONTROLLED_CASES = [
         "triples": [
             ("Steve Jobs", "founded", "Apple")
         ],
+        "reliability": 1.0,
         "expected": "ACCEPT",
     },
 
@@ -33,6 +35,7 @@ CONTROLLED_CASES = [
             ("Steve Jobs", "founded", "Apple"),
             ("Steve Jobs", "founded", "Apple")
         ],
+        "reliability": 1.0,
         "expected": "MERGE",
     },
 
@@ -46,6 +49,7 @@ CONTROLLED_CASES = [
             ("TechCorp", "has CEO", "John Smith"),
             ("TechCorp", "has CEO", "Jane Smith")
         ],
+        "reliability": 1.0,
         "expected": "UPDATE",
     },
 
@@ -58,6 +62,7 @@ CONTROLLED_CASES = [
         "triples": [
             ("Random Person", "likes", "blue pens")
         ],
+        "reliability": 1.0,
         "expected": "ARCHIVE",
     },
 
@@ -70,6 +75,23 @@ CONTROLLED_CASES = [
         "triples": [
             ("unknown", "unknown", "unknown")
         ],
+        "reliability": 1.0,
+        "expected": "DISCARD",
+    },
+
+    # ---------------------------------------------------------
+    # CASE 6: LOW SOURCE RELIABILITY
+    # Expected: DISCARD
+    #
+    # This specifically tests the ACMQ-RAG critical
+    # source-reliability safeguard.
+    # ---------------------------------------------------------
+    {
+        "name": "low_reliability",
+        "triples": [
+            ("Random Source", "claims", "Unverified Fact")
+        ],
+        "reliability": 0.10,
         "expected": "DISCARD",
     },
 ]
@@ -88,8 +110,9 @@ if __name__ == "__main__":
 
     for case in CONTROLLED_CASES:
         print()
-        print(f"Case     : {case['name']}")
-        print(f"Expected : {case['expected']}")
+        print(f"Case       : {case['name']}")
+        print(f"Expected   : {case['expected']}")
+        print(f"Reliability: {case['reliability']}")
 
         for triple in case["triples"]:
             print(

@@ -644,56 +644,43 @@ class MemoryStore:
     def statistics(self):
 
         counts = {
+            # Backward-compatible API key.
             "total_memories": len(self.memories),
+
+            # Clearer state metrics.
+            "total_stored": len(self.memories),
+            "active": len(self.get_graph_memories()),
+            "archived": len(self.archived),
+
+            "total_decisions": len(
+                self.decision_history
+            ),
+
             "accepted": 0,
             "merged": 0,
             "updated": 0,
-            "archived": 0,
+            "archived_decisions": 0,
             "discarded": 0,
         }
 
-        for memory in self.memories.values():
+        for record in self.decision_history:
 
-            decision = memory.decision
+            decision = record["decision"]
 
-            if decision == MemoryDecision.ACCEPT:
+            if decision == MemoryDecision.ACCEPT.value:
                 counts["accepted"] += 1
 
-            elif decision == MemoryDecision.MERGE:
+            elif decision == MemoryDecision.MERGE.value:
                 counts["merged"] += 1
 
-            elif decision == MemoryDecision.UPDATE:
+            elif decision == MemoryDecision.UPDATE.value:
                 counts["updated"] += 1
 
-            elif decision == MemoryDecision.ARCHIVE:
-                counts["archived"] += 1
+            elif decision == MemoryDecision.ARCHIVE.value:
+                counts["archived_decisions"] += 1
 
-            elif decision == MemoryDecision.DISCARD:
+            elif decision == MemoryDecision.DISCARD.value:
                 counts["discarded"] += 1
-
-        counts["decision_history"] = len(
-            self.decision_history
-        )
-
-        counts["merge_events"] = len(
-            self.merge_history
-        )
-
-        counts["update_events"] = len(
-            self.update_history
-        )
-
-        counts["archive_events"] = len(
-            self.archive_history
-        )
-
-        counts["discard_events"] = len(
-            self.discard_history
-        )
-
-        counts["accept_events"] = len(
-            self.accept_history
-        )
 
         return counts
 

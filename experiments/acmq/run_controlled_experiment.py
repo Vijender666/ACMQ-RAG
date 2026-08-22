@@ -20,14 +20,18 @@ from hipporag.memory.memory_decision_engine import MemoryDecisionEngine
 from hipporag.memory.memory_store import MemoryStore
 
 
-def make_memory(triple):
+def make_memory(triple, reliability=1.0):
     subject, relation, obj = triple
 
-    return MemoryUnit(
+    memory = MemoryUnit(
         subject=subject,
         relation=relation,
         object=obj,
     )
+
+    memory.metadata.reliability = reliability
+
+    return memory
 
 
 def controlled_graph_stats(case_name):
@@ -97,7 +101,13 @@ def run_case(case):
     print("=" * 70)
 
     memories = [
-        make_memory(triple)
+        make_memory(
+            triple,
+            reliability=case.get(
+                "reliability",
+                1.0,
+            ),
+        )
         for triple in case["triples"]
     ]
 

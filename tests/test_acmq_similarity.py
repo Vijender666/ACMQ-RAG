@@ -2,7 +2,9 @@ import sys
 from pathlib import Path
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(PROJECT_ROOT))
+
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
 
 from src.hipporag.memory.memory_decision_engine import MemoryDecisionEngine
 from src.hipporag.memory.memory_types import MemoryUnit
@@ -16,49 +18,107 @@ def make_memory(subject, relation, obj):
     )
 
 
-def main():
-
+def test_exact_duplicate_similarity():
     engine = MemoryDecisionEngine()
 
-    cases = [
-        (
-            "EXACT DUPLICATE",
-            ("john smith", "is", "ceo of techcorp"),
-            ("john smith", "is", "ceo of techcorp"),
-        ),
-        (
-            "SAME SUBJECT + RELATION",
-            ("john smith", "is", "ceo of techcorp"),
-            ("john smith", "is", "ceo of anothercorp"),
-        ),
-        (
-            "DIFFERENT SUBJECT",
-            ("john smith", "is", "ceo of techcorp"),
-            ("jane smith", "is", "ceo of techcorp"),
-        ),
-        (
-            "UNRELATED",
-            ("john smith", "is", "ceo of techcorp"),
-            ("cinderella", "attended", "royal ball"),
-        ),
-    ]
+    memory_a = make_memory(
+        "john smith",
+        "is",
+        "ceo of techcorp",
+    )
 
-    print("\n========== ACMQ-RAG SEMANTIC SIMILARITY ==========\n")
+    memory_b = make_memory(
+        "john smith",
+        "is",
+        "ceo of techcorp",
+    )
 
-    for name, first, second in cases:
+    similarity = engine.semantic_similarity(
+        memory_a,
+        memory_b,
+    )
 
-        memory_a = make_memory(*first)
-        memory_b = make_memory(*second)
+    print(f"\nEXACT DUPLICATE similarity={similarity:.4f}")
 
-        similarity = engine.semantic_similarity(
-            memory_a,
-            memory_b,
-        )
-
-        print(f"{name:<25} : {similarity:.4f}")
-
-    print("\n==================================================\n")
+    assert similarity >= 0.95
 
 
-if __name__ == "__main__":
-    main()
+def test_same_subject_relation_similarity():
+    engine = MemoryDecisionEngine()
+
+    memory_a = make_memory(
+        "john smith",
+        "is",
+        "ceo of techcorp",
+    )
+
+    memory_b = make_memory(
+        "john smith",
+        "is",
+        "ceo of anothercorp",
+    )
+
+    similarity = engine.semantic_similarity(
+        memory_a,
+        memory_b,
+    )
+
+    print(
+        f"\nSAME SUBJECT + RELATION similarity={similarity:.4f}"
+    )
+
+    assert similarity > 0.50
+
+
+def test_different_subject_similarity():
+    engine = MemoryDecisionEngine()
+
+    memory_a = make_memory(
+        "john smith",
+        "is",
+        "ceo of techcorp",
+    )
+
+    memory_b = make_memory(
+        "jane smith",
+        "is",
+        "ceo of techcorp",
+    )
+
+    similarity = engine.semantic_similarity(
+        memory_a,
+        memory_b,
+    )
+
+    print(
+        f"\nDIFFERENT SUBJECT similarity={similarity:.4f}"
+    )
+
+    assert similarity < 0.95
+
+
+def test_unrelated_similarity():
+    engine = MemoryDecisionEngine()
+
+    memory_a = make_memory(
+        "john smith",
+        "is",
+        "ceo of techcorp",
+    )
+
+    memory_b = make_memory(
+        "cinderella",
+        "attended",
+        "royal ball",
+    )
+
+    similarity = engine.semantic_similarity(
+        memory_a,
+        memory_b,
+    )
+
+    print(
+        f"\nUNRELATED similarity={similarity:.4f}"
+    )
+
+    assert similarity < 0.80

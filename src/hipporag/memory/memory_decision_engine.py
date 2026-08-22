@@ -32,12 +32,16 @@ class MemoryDecisionEngine:
         archive_threshold: float = 0.45,
         semantic_merge_threshold: float = 0.80,
         semantic_update_threshold: float = 0.60,
+        critical_reliability_threshold: float = 0.30,
     ):
 
         self.accept_threshold = accept_threshold
         self.archive_threshold = archive_threshold
         self.semantic_merge_threshold = semantic_merge_threshold
         self.semantic_update_threshold = semantic_update_threshold
+        self.critical_reliability_threshold = (
+            critical_reliability_threshold
+        )
 
         self._embedding_model = None
 
@@ -274,36 +278,95 @@ class MemoryDecisionEngine:
                 existing,
             )
 
+            print(
+                "ACMQ-RAG SEMANTIC CHECK:",
+                memory.as_text(),
+                "<->",
+                existing.as_text(),
+                f"| similarity={similarity:.4f}",
+            )
+
             if similarity > best_similarity:
 
                 best_similarity = similarity
                 best_existing = existing
 
         # =====================================================
-        # STEP 4: SEMANTIC DUPLICATE
+        # STEP 4: SEMANTIC RELATION DECISION
         # =====================================================
 
         if best_existing is not None:
 
             same_subject = (
                 memory.subject.strip().lower()
-                ==
-                best_existing.subject.strip().lower()
+                == best_existing.subject.strip().lower()
+            )
+
+            same_object = (
+                memory.object.strip().lower()
+                == best_existing.object.strip().lower()
             )
 
             same_relation = (
                 memory.relation.strip().lower()
-                ==
-                best_existing.relation.strip().lower()
+                == best_existing.relation.strip().lower()
             )
+
+            # -------------------------------------------------
+            # SEMANTIC UPDATE
+            # -------------------------------------------------
+            #
+            # Same subject + sufficiently high semantic
+            # similarity means this is related/evolving
+            # knowledge, even when relation wording differs.
+            #
+            # Example:
+            #
+            # Tim Cook --[leads]--> Apple
+            # Tim Cook --[is the chief executive of]--> Apple
+            #
+            # These should produce UPDATE.
+            # -------------------------------------------------
 
             if (
                 same_subject
-                and
-                same_relation
-                and
-                best_similarity
-                >= self.semantic_merge_threshold
+                and best_similarity >= self.semantic_update_threshold
+            ):
+
+                memory.set_decision(
+                    MemoryDecision.UPDATE
+                )
+
+                memory.matched_memory_hash = (
+                    self._memory_hash(best_existing)
+                )
+
+                memory.decision_reason = (
+                    "Semantically similar memory with "
+                    "matching subject and evolving evidence"
+                )
+
+                print(
+                    "ACMQ-RAG DECISION: UPDATE |",
+                    memory.as_text(),
+                    f"| similarity={best_similarity:.3f}",
+                )
+
+                return memory
+
+            # -------------------------------------------------
+            # SEMANTIC MERGE
+            # -------------------------------------------------
+            #
+            # Same subject + object + relation with very high
+            # similarity represents a semantic duplicate.
+            # -------------------------------------------------
+
+            if (
+                same_subject
+                and same_object
+                and same_relation
+                and best_similarity >= self.semantic_merge_threshold
             ):
 
                 memory.set_decision(
@@ -316,7 +379,7 @@ class MemoryDecisionEngine:
 
                 memory.decision_reason = (
                     "Semantic duplicate with matching "
-                    "subject and relation"
+                    "subject, relation, and object"
                 )
 
                 print(
@@ -351,8 +414,94 @@ class MemoryDecisionEngine:
         # =====================================================
         # STEP 6: QUALITY DECISION
         # =====================================================
+        #
+        # ACMQ-RAG uses both:
+        #
+        # 1. Overall multi-factor quality score
+        # 2. Critical quality safeguards
+        #
+        # This prevents a memory with critically poor
+        # reliability, consistency, or content quality
+        # from being accepted solely because other factors
+        # compensate for it.
+        # =====================================================
 
         score = memory.quality.overall_score
+
+        reliability = memory.quality.source_reliability
+        consistency = memory.quality.semantic_consistency
+        content_quality = memory.quality.content_quality
+
+        # -----------------------------------------------------
+        # CRITICAL QUALITY SAFEGUARD
+        # -----------------------------------------------------
+
+        # Only apply dimension-level safeguards when the memory
+        # has actually been evaluated by the quality model.
+        #
+        # This preserves compatibility with manually constructed
+        # MemoryUnits that provide an overall quality score directly.
+
+        if memory.quality.evaluated:
+
+            if reliability <= self.critical_reliability_threshold:
+
+                memory.set_decision(
+                    MemoryDecision.DISCARD
+                )
+
+                memory.decision_reason = (
+                    "Critically low source reliability"
+                )
+
+                print(
+                    "ACMQ-RAG DECISION: DISCARD |",
+                    memory.as_text(),
+                    f"| reliability={reliability:.3f}",
+                    f"| threshold="
+                    f"{self.critical_reliability_threshold:.3f}",
+                )
+
+                return memory
+
+            if consistency <= 0.0:
+
+                memory.set_decision(
+                    MemoryDecision.DISCARD
+                )
+
+                memory.decision_reason = (
+                    "Zero semantic consistency"
+                )
+
+                print(
+                    "ACMQ-RAG DECISION: DISCARD |",
+                    memory.as_text(),
+                    f"| consistency={consistency:.3f}",
+                )
+
+                return memory
+
+        if content_quality <= 0.0:
+
+            memory.set_decision(
+                MemoryDecision.DISCARD
+            )
+
+            memory.decision_reason = (
+                "Invalid or zero content quality"
+            )
+
+            print(
+                "ACMQ-RAG DECISION: DISCARD |",
+                memory.as_text(),
+            )
+
+            return memory
+
+        # -----------------------------------------------------
+        # OVERALL QUALITY DECISION
+        # -----------------------------------------------------
 
         if score >= self.accept_threshold:
 

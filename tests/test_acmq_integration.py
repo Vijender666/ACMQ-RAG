@@ -90,6 +90,8 @@ def test_decision_engine():
     )
 
     memory.quality.overall_score = 0.95
+    memory.quality.source_reliability = 1.0
+    memory.quality.semantic_consistency = 1.0
     memory.quality.content_quality = 1.0
     memory.quality.evaluated = True
 
