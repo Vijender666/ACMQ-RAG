@@ -515,40 +515,6 @@ class HippoRAG:
         # Reconstruct graph triples from selected memories
         # ----------------------------------------------------------
 
-        memory_map = {}
-
-        for memory in graph_memories:
-
-            chunk_id = memory.metadata.chunk_id
-
-            if chunk_id is None:
-                continue
-
-            memory_map.setdefault(
-                chunk_id,
-                []
-            ).append(
-                (
-                    memory.subject,
-                    memory.relation,
-                    memory.object
-                )
-            )
-
-        filtered_chunk_triples = []
-
-        for chunk_id in chunk_ids:
-            filtered_chunk_triples.append(
-                memory_map.get(chunk_id, [])
-            )
-
-        chunk_triples = filtered_chunk_triples
-
-        print(
-            "ACMQ-RAG: Filtered graph triples:",
-            sum(len(x) for x in chunk_triples)
-        )
-
         # ==========================================================
         # ACMQ-RAG Final Graph Reconstruction
         # ==========================================================

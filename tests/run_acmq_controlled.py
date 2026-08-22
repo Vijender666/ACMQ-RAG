@@ -92,6 +92,7 @@ def run_case(case):
         memory_units = pipeline.triples_to_memory_units(
             [triple],
             source_name="controlled_experiment",
+            source_reliability=case["reliability"],
         )
 
         memory_units = pipeline.evaluate(memory_units)
