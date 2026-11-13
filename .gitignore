@@ -23,3 +23,33 @@ data/
 clear_outputs_and_logs.sh
 # Ignore the env file
 .env
+# Python environments
+.venv/
+venv/
+env/
+__pycache__/
+*.py[cod]
+
+# Environment variables and secrets
+.env
+.env.*
+!.env.example
+
+# Model and embedding caches
+.cache/
+cache/
+huggingface/
+chroma_db/
+
+# ACMQ experiment results
+experiments/acmq/results/
+*.log
+
+# Backup files
+*.bak
+*.backup
+*.before_graph_fix
+*.before_node_filter
+
+# OS files
+.DS_Store

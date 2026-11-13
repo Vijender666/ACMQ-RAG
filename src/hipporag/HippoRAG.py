@@ -191,6 +191,7 @@ class HippoRAG:
         self.rerank_filter = DSPyFilter(self)
 
         self.ready_to_retrieve = False
+        self.enable_acmq = False
 
         # ==========================================================
         # ACMQ-RAG Memory Pipeline
@@ -347,6 +348,11 @@ class HippoRAG:
             chunk_triples
         )
 
+        allowed_entity_ids = {
+            compute_mdhash_id(entity, prefix='entity-')
+            for entity in entity_nodes
+        }
+
         facts = flatten_facts(
             chunk_triples
         )
@@ -377,7 +383,36 @@ class HippoRAG:
         self.add_synonymy_edges()
 
         self.augment_graph()
+
+        print("=" * 60)
+        print("ACMQ-RAG DEBUG: FINAL GRAPH")
+        print("=" * 60)
+
+        print("Final graph nodes:", len(self.graph.vs))
+        print("Final graph edges:", len(self.graph.es))
+
+        print(
+            "Final entity nodes:",
+            sum(
+                1
+                for v in self.graph.vs
+                if str(v["name"]).startswith("entity-")
+            )
+        )
+
+        print(
+            "Final passage nodes:",
+            sum(
+                1
+                for v in self.graph.vs
+                if str(v["name"]).startswith("chunk-")
+            )
+        )
+
         self.save_igraph()
+
+        if not self.enable_acmq:
+            return
 
         # ==========================================================
         # ACMQ-RAG Graph Statistics
@@ -487,6 +522,27 @@ class HippoRAG:
             decided_memories
         )
 
+        # ==========================================================
+        # ACMQ-RAG: Query-Time Memory Quality Mapping
+        # ==========================================================
+        self.acmq_fact_quality = {}
+
+        for memory in self.memory_pipeline.memory_store.memories.values():
+            fact_key = (
+                memory.subject.strip(),
+                memory.relation.strip(),
+                memory.object.strip(),
+            )
+
+            self.acmq_fact_quality[fact_key] = (
+                memory.quality.overall_score
+            )
+
+        logger.info(
+            "ACMQ-RAG: query-time quality map contains "
+            f"{len(self.acmq_fact_quality)} facts"
+        )
+
         self.memory_pipeline.print_statistics()
 
         # ==========================================================
@@ -529,6 +585,20 @@ class HippoRAG:
             graph_memories,
         )
 
+        print("=" * 60)
+        print("ACMQ-RAG DEBUG: FINAL SELECTED TRIPLES")
+        print("=" * 60)
+
+        for idx, triples in enumerate(chunk_triples):
+            print(f"CHUNK {idx} ({chunk_ids[idx]}): {len(triples)} triples")
+            for triple in triples:
+                print("   ", triple)
+
+        print(
+            "ACMQ-RAG DEBUG: TOTAL SELECTED TRIPLES:",
+            sum(len(x) for x in chunk_triples)
+        )
+
         print(
             "ACMQ-RAG: Final graph triples:",
             sum(len(x) for x in chunk_triples)
@@ -537,6 +607,37 @@ class HippoRAG:
         # Recompute entities and facts from ACMQ-selected memories.
         entity_nodes, chunk_triple_entities = extract_entity_nodes(
             chunk_triples
+        )
+
+        allowed_entity_ids = {
+            compute_mdhash_id(entity, prefix='entity-')
+            for entity in entity_nodes
+        }
+
+        self.allowed_entity_ids = allowed_entity_ids
+
+        print(
+            'ACMQ-RAG: Allowed entity nodes:',
+            len(allowed_entity_ids)
+        )
+
+        print("=" * 60)
+        print("ACMQ-RAG DEBUG: ENTITY FILTER")
+        print("=" * 60)
+
+        all_entity_ids = set(
+            self.entity_embedding_store.get_all_ids()
+        )
+
+        print("Original entity IDs:", len(all_entity_ids))
+        print("ACMQ allowed entity IDs:", len(allowed_entity_ids))
+        print(
+            "Removed entity IDs:",
+            len(all_entity_ids - allowed_entity_ids)
+        )
+        print(
+            "Kept entity IDs:",
+            len(all_entity_ids & allowed_entity_ids)
         )
 
         facts = flatten_facts(
@@ -578,7 +679,9 @@ class HippoRAG:
                 f"ACMQ-RAG: Added {num_new_chunks} selected chunks to final graph."
             )
 
-        self.add_synonymy_edges()
+        self.add_synonymy_edges(
+            allowed_entity_ids=allowed_entity_ids
+        )
 
         self.augment_graph()
         self.save_igraph()
@@ -836,6 +939,7 @@ class HippoRAG:
         if gold_docs is not None:
             retrieval_recall_evaluator = RetrievalRecall(global_config=self.global_config)
 
+        print("🔥 RETRIEVE METHOD ACTUALLY CALLED")
         if not self.ready_to_retrieve:
             self.prepare_retrieval_objects()
 
@@ -851,10 +955,15 @@ class HippoRAG:
 
             self.rerank_time += rerank_end - rerank_start
 
+            logger.info(f'ACMQ DEBUG: Query {q_idx+1} top_k_facts = {len(top_k_facts)}')
+            print(f'🔥 QUERY {q_idx+1}: top_k_facts={len(top_k_facts)}')
+            logger.info(f'ACMQ DEBUG: Query {q_idx+1} facts = {top_k_facts}')
+
             if len(top_k_facts) == 0:
                 logger.info('No facts found after reranking, return DPR results')
                 sorted_doc_ids, sorted_doc_scores = self.dense_passage_retrieval(query)
             else:
+                print(f'🔥 GRAPH SEARCH CALLED FOR QUERY {q_idx+1}')
                 sorted_doc_ids, sorted_doc_scores = self.graph_search_with_fact_entities(query=query,
                                                                                          link_top_k=self.global_config.linking_top_k,
                                                                                          query_fact_scores=query_fact_scores,
@@ -877,7 +986,7 @@ class HippoRAG:
 
         # Evaluate retrieval
         if gold_docs is not None:
-            k_list = [1, 2, 5, 10, 20, 30, 50, 100, 150, 200]
+            k_list = [k for k in [1, 2, 5, 10, 20, 30, 50, 100, 150, 200] if k <= num_to_retrieve]
             overall_retrieval_result, example_retrieval_results = retrieval_recall_evaluator.calculate_metric_scores(gold_docs=gold_docs, retrieved_docs=[retrieval_result.docs for retrieval_result in retrieval_results], k_list=k_list)
             logger.info(f"Evaluation results for retrieval: {overall_retrieval_result}")
 
@@ -1343,7 +1452,7 @@ class HippoRAG:
 
         return num_new_chunks
 
-    def add_synonymy_edges(self):
+    def add_synonymy_edges(self, allowed_entity_ids=None):
         """
         Adds synonymy edges between similar nodes in the graph to enhance connectivity by identifying and linking synonym entities.
 
@@ -1362,7 +1471,17 @@ class HippoRAG:
         """
         logger.info(f"Expanding graph with synonymy edges")
 
-        self.entity_id_to_row = self.entity_embedding_store.get_all_id_to_rows()
+        all_entity_id_to_row = self.entity_embedding_store.get_all_id_to_rows()
+
+        if allowed_entity_ids is None:
+            self.entity_id_to_row = all_entity_id_to_row
+        else:
+            self.entity_id_to_row = {
+                entity_id: row
+                for entity_id, row in all_entity_id_to_row.items()
+                if entity_id in allowed_entity_ids
+            }
+
         entity_node_keys = list(self.entity_id_to_row.keys())
 
         logger.info(f"Performing KNN retrieval for each phrase nodes ({len(entity_node_keys)}).")
@@ -1556,9 +1675,19 @@ class HippoRAG:
         existing_nodes = {v["name"]: v for v in self.graph.vs if "name" in v.attributes()}
 
         entity_to_row = self.entity_embedding_store.get_all_id_to_rows()
+
+        # ACMQ-RAG: when a final entity whitelist is available,
+        # only materialize ACMQ-selected entity nodes into the graph.
+        if hasattr(self, "allowed_entity_ids") and self.allowed_entity_ids is not None:
+            entity_to_row = {
+                entity_id: row
+                for entity_id, row in entity_to_row.items()
+                if entity_id in self.allowed_entity_ids
+            }
+
         passage_to_row = self.chunk_embedding_store.get_all_id_to_rows()
 
-        node_to_rows = entity_to_row
+        node_to_rows = entity_to_row.copy()
         node_to_rows.update(passage_to_row)
 
         new_nodes = {}
@@ -1642,7 +1771,15 @@ class HippoRAG:
         graph_info = {}
 
         # get # of phrase nodes
-        phrase_nodes_keys = self.entity_embedding_store.get_all_ids()
+        if hasattr(self, "allowed_entity_ids") and self.allowed_entity_ids is not None:
+            phrase_nodes_keys = [
+                entity_id
+                for entity_id in self.entity_embedding_store.get_all_ids()
+                if entity_id in self.allowed_entity_ids
+            ]
+        else:
+            phrase_nodes_keys = self.entity_embedding_store.get_all_ids()
+
         graph_info["num_phrase_nodes"] = len(set(phrase_nodes_keys))
 
         # get # of passage nodes
@@ -1688,6 +1825,11 @@ class HippoRAG:
 
         self.entity_node_keys: List = list(self.entity_embedding_store.get_all_ids()) # a list of phrase node keys
         self.passage_node_keys: List = list(self.chunk_embedding_store.get_all_ids()) # a list of passage node keys
+
+        # ACMQ-RAG: synchronize retrieval entities with the filtered final graph
+        if hasattr(self, "allowed_entity_ids") and self.allowed_entity_ids is not None:
+            self.entity_node_keys = [k for k in self.entity_node_keys if k in self.allowed_entity_ids]
+            logger.info(f"ACMQ-RAG: synchronized entity_node_keys={len(self.entity_node_keys)}")
         self.fact_node_keys: List = list(self.fact_embedding_store.get_all_ids())
 
         # Check if the graph has the expected number of nodes
@@ -1965,6 +2107,7 @@ class HippoRAG:
         #Assigning phrase weights based on selected facts from previous steps.
         linking_score_map = {}  # from phrase to the average scores of the facts that contain the phrase
         phrase_scores = {}  # store all fact scores for each phrase regardless of whether they exist in the knowledge graph or not
+        print("🔥 GRAPH SEARCH METHOD ENTERED")
         phrase_weights = np.zeros(len(self.graph.vs['name']))
         passage_weights = np.zeros(len(self.graph.vs['name']))
         number_of_occurs = np.zeros(len(self.graph.vs['name']))
@@ -1978,6 +2121,38 @@ class HippoRAG:
             fact_score = query_fact_scores[
                 top_k_fact_indices[rank]] if query_fact_scores.ndim > 0 else query_fact_scores
 
+
+            # ======================================================
+            # ACMQ-RAG: Query-Time Quality-Aware Fact Weighting
+            # ======================================================
+            if (
+                self.enable_acmq
+                and hasattr(self, "acmq_fact_quality")
+            ):
+                fact_key = (
+                    str(f[0]).strip(),
+                    str(f[1]).strip(),
+                    str(f[2]).strip(),
+                )
+
+                acmq_quality = self.acmq_fact_quality.get(
+                    fact_key,
+                    1.0
+                )
+
+                weighted_fact_score = (
+                    fact_score * acmq_quality
+                )
+
+                logger.info(
+                    f"ACMQ-RAG QUERY FACT: {fact_key} | "
+                    f"query_score={fact_score:.6f} | "
+                    f"quality={acmq_quality:.6f} | "
+                    f"weighted={weighted_fact_score:.6f}"
+                )
+            else:
+                weighted_fact_score = fact_score
+
             for phrase in [subject_phrase, object_phrase]:
                 phrase_key = compute_mdhash_id(
                     content=phrase,
@@ -1986,7 +2161,6 @@ class HippoRAG:
                 phrase_id = self.node_name_to_vertex_idx.get(phrase_key, None)
 
                 if phrase_id is not None:
-                    weighted_fact_score = fact_score
 
                     if len(self.ent_node_to_chunk_ids.get(phrase_key, set())) > 0:
                         weighted_fact_score /= len(self.ent_node_to_chunk_ids[phrase_key])
@@ -2034,8 +2208,37 @@ class HippoRAG:
 
         assert sum(node_weights) > 0, f'No phrases found in the graph for the given facts: {top_k_facts}'
 
+        # DEBUG: inspect PPR seed distribution
+        nonzero_indices = np.where(node_weights > 0)[0]
+        top_seed_indices = nonzero_indices[np.argsort(node_weights[nonzero_indices])[-10:][::-1]]
+
+        logger.info("============================================================")
+        logger.info("ACMQ DEBUG: PPR SEEDS")
+        logger.info(f"Non-zero seeds: {len(nonzero_indices)}")
+        logger.info(f"Total seed weight: {np.sum(node_weights):.6f}")
+
+        for idx in top_seed_indices:
+            logger.info(f"  {self.graph.vs[idx]['name']} -> {node_weights[idx]:.6f}")
+
         #Running PPR algorithm based on the passage and phrase weights previously assigned
         ppr_start = time.time()
+        # ACMQ-RAG DEBUG: inspect actual PPR seed distribution
+        nonzero_indices = np.where(node_weights > 0)[0]
+        top_seed_indices = nonzero_indices[
+            np.argsort(node_weights[nonzero_indices])[-10:][::-1]
+        ]
+
+        print("========== PPR SEED DEBUG ==========")
+        print(f"Non-zero seeds: {len(nonzero_indices)}")
+        print(f"Total seed weight: {np.sum(node_weights):.6f}")
+
+        for idx in top_seed_indices:
+            print(
+                f"  {self.graph.vs[idx]['name']} -> "
+                f"{node_weights[idx]:.6f}"
+            )
+
+        print("====================================")
         ppr_sorted_doc_ids, ppr_sorted_doc_scores = self.run_ppr(node_weights, damping=self.global_config.damping)
         ppr_end = time.time()
 
